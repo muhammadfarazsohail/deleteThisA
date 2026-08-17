@@ -1,7 +1,8 @@
 # Merge One Git Repository into Another While Preserving History
 
 This runbook merges a source repository into a target repository with a real
-Git merge commit. Every source commit remains reachable in the target history.
+Git merge commit. Every source commit remains reachable in the target history,
+and destination-owned files are explicitly retained.
 
 ## Values used for this merge
 
@@ -40,13 +41,50 @@ git fetch $TargetRemote --prune
 git switch $SourceBranch
 git pull --ff-only
 git switch -c $IntegrationBranch "$TargetRemote/$TargetBranch"
-git merge $SourceBranch --allow-unrelated-histories --no-ff -m "Merge source repository history into target"
+git merge $SourceBranch --allow-unrelated-histories --no-ff --no-commit
 ```
 
 The `--allow-unrelated-histories` option is required for the first merge when
 the repositories have independent roots. It is harmless to omit it for later
 synchronization merges after the histories share ancestry. `--no-ff` records a
 clear integration commit even when Git could otherwise fast-forward.
+
+## Keep files from both repositories
+
+Before completing the merge, inspect the staged result:
+
+```powershell
+git status --short
+git diff --cached --name-status
+```
+
+Git may infer that a destination file was renamed or deleted by the source,
+especially when files have identical content. Restore every destination-owned
+path that must remain from the target branch snapshot:
+
+```powershell
+git restore --source="$TargetRemote/$TargetBranch" --staged --worktree -- file1.cs file2.cs
+git status --short
+git commit -m "Merge source history into target while retaining destination files"
+```
+
+Replace `file1.cs file2.cs` with the destination paths you need to retain. The
+restore changes only the merge result; it does not remove either repository's
+commit history.
+
+If both repositories contain different files at the same path, both cannot
+exist at that exact path. Choose a new path for one copy before committing, for
+example:
+
+```powershell
+New-Item -ItemType Directory -Force source-project
+git show "$SourceBranch`:shared-name.cs" | Set-Content source-project/shared-name.cs
+git add source-project/shared-name.cs
+```
+
+Review line endings and binary files after extracting a file this way. For a
+large repository with many collisions, place one repository under a prefix
+before merging rather than resolving every collision manually.
 
 If the remote name already exists, update and fetch it instead:
 
@@ -114,14 +152,15 @@ and repeat the integration from the latest target branch:
 ```powershell
 git fetch origin --prune
 git fetch $TargetRemote --prune
-git switch $IntegrationBranch
-git reset --hard "$TargetRemote/$TargetBranch"
-git merge "origin/$SourceBranch" --no-ff -m "Merge latest source history into target"
+git switch $SourceBranch
+git pull --ff-only
+git switch -c integrate-source-update-2 "$TargetRemote/$TargetBranch"
+git merge "origin/$SourceBranch" --no-ff --no-commit
+# Restore destination-owned paths as shown above, review, and then commit.
 ```
 
-`git reset --hard` discards local changes on the integration branch. Use it only
-after confirming the working tree is clean. A safer alternative is to delete
-and recreate the disposable integration branch after switching away from it.
+Use a new disposable integration-branch name for each update. This avoids
+resetting an older integration branch and makes the operation easier to audit.
 
 Verify again, then push with the same commands from the previous sections.
 
@@ -136,3 +175,17 @@ git show --no-patch --format="%H%n%P%n%s" HEAD
 ```
 
 The `%P` line should contain two parent commit hashes.
+
+## Execution record for deleteThisB into deleteThisA
+
+1. Added `deleteThisA` as remote `projectA` and fetched its `master` branch.
+2. Created an integration branch from `projectA/master`.
+3. Merged the independent `deleteThisB` history with
+   `--allow-unrelated-histories`.
+4. Verified that both source and target tips were ancestors of the merge.
+5. Published the integration to `deleteThisA/master`.
+6. A later source update caused Git to infer 100% renames from `file1.cs` and
+   `file2.cs` to `file3.cs` and `file4.cs`.
+7. The corrective update restores `file1.cs` and `file2.cs` from the previous
+   destination snapshot, keeps `file3.cs`, `file4.cs`, and `file5.cs` from the
+   source, and retains both histories.
